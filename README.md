@@ -1,1 +1,344 @@
 # Node_DAO
+
+# 概述DAO层的封装
+1. 首先我们拿JDBC的DAO层来举例子
+DAO(Data Access Object) 是数据访问层
+
+Action像是服务员，顾客点什么菜，菜上给几号桌，都是ta的职责；Service是厨师，action送来的菜单上的菜全是ta做的；Dao是厨房的小工，和原材料(通过hibernate操作数据库)打交道的事情全是ta管。
+
+     对象的调用流程：JSP—Action—Service—DAO—Hibernate（某框架）—数据库。
+
+2. 我们来谈谈Node的DAO层封装那些事
+
+> 基于我目前的开发项目的架构，从数据的流转来看，它类似于下面这个样子
+  Model（数据模型）--  Middleware(数据处理中间件) -- Router（路由处理）
+
+这一讲我们主要是关注与Model层的处理，既，如果更加简单更加精确的的把数据查询出来
+
+## 一、 关于Node for MYSQL的DAO封装
+> 基础的知识，我们这里不讲，我们直接考虑如何在项目中使用
+
+1. 首先我们npm mysql，这个没有什么好解释的
+
+2. 开始封装一个最基础的通用的数据链接类 
+> 要在node中操作mysql，一般有如下的事情要做
+**基础的使用我就不讲了，我们直接用单例模式来进行封装成一个类** 
+[model/DAO/model.js]
+```js
+const mysql = require('mysql')
+
+/**
+ * 数据模型的基类
+ * 封装了数据库操作
+ */
+module.exports = class Model {
+    // 连接对象
+    static conn = null
+    /**
+     * 初始化数据连接操作
+     */
+    static connection() {
+        Model.conn = mysql.createConnection({
+            host: '127.0.0.1',
+            user: 'root',
+            password: '123',
+            database: 'blog'
+        })
+        Model.conn.connect(err => {
+            if (err) {
+                console.log(`数据库连接失败：${err.message}`)
+            }
+        })
+    }
+
+    /**
+     * 关闭数据库连接,注意，你需要及时的关闭查询数据流，比秒消耗性能
+     */
+    static end() {
+        if (null != Model.conn) {
+            Model.conn.end()
+        }
+    }
+
+    /**
+     * 通用查询方法
+     * @param {string} sql 要执行的SQL语句
+     * @param {Array} params 给SQL语句的占位符,以后由具体的Model决定具体的传入参数
+     */
+    static query(sql, params = []) {
+        return new Promise((resolve, reject) => {
+            this.connection()//调用连接
+            //开始查询
+            Model.conn.query(sql, params, (err, results) => {
+                if (err) {
+                    reject(err)
+                } else {
+                    resolve(results)
+                
+                }
+            })
+            //关闭流
+            this.end()
+        })
+    }
+}
+
+
+```
+
+
+3. 具体的业务查询的实现
+> 这里我们假设我的表里面有这些字段，我们具体的业务就是在这里构造查询条件然后就可以去展开具体的查询了，注意继承
+
+[model/articel.js]
+```js
+const Mysql =  require('./DAO/model');
+
+
+//开始实现具体的查询Model
+
+module.exports = class Article extends Mysql {
+    /**
+     * 描述 查询所有的列表，这里是SQL的具体的实现方法,根据以往需求来处理
+     * @date 2020-04-29
+     * @returns {any} 返回值是查询出来的数据对象
+     */
+    static getList() {
+        return new Promise((resolve, reject) => {
+            let sql = 'SELECT id,title,content,`time`,thumbnail FROM article ORDER BY TIME DESC'
+            this.query(sql).then(results => {//调用父类的查询方式
+                resolve(results)
+            }).catch(err => {
+                console.log(`获取文章列表失败：${err.message}`)
+                reject(err)
+            })
+        })
+    }
+
+   /**
+     * 获取指定文章的详情
+     * @param {integer} id 文章编号
+     */
+    static getArticleById(id) {
+        return new Promise((resolve, reject) => {
+            let sql = 'SELECT a.id,a.title,a.content,a.`time`,a.hits,a.`category_id`,c.`name`,a.`thumbnail`,a.`hot` FROM article a,category c WHERE a.`category_id` = c.`id` AND a.id = ?'
+            this.query(sql, id).then(results => {//调用父类的查询方式
+                resolve(results[0])
+            }).catch(err => {
+                console.log(`获取指定文章的详情失败：${err.message}`)
+                reject(err)
+            })
+        })
+    }
+    
+}
+```
+> 然后呢？如何使用？具体的node项目中，需要说明的，以上的两端代码 在node中，都是处于Model下的，有了model使用就相对比较简单了，
+router( 调用中间件mideelwear )--- middleware(接受到router的需求开始调用模型层拿数据) --以req方式，丢回给router，router反过来拿数据去渲染或者做成API接口就可以了
+
+
+[router/index.js]
+```js
++++
+const Articel = require('../middelwear/article')
++++
+articleApp.get('/:id', [Articel.getArticleById], (req, res) => {
+    let { article } = req//由于我们之前的中间件已经把结果存到了req里面，这样我们就能直接拿了
+    //如果是模板渲染可以这样来干
+    // res.render('article', { article: article })//如果你需要做API接口于是乎你可以以JSON形式丢出去
+    res.send( JSON.stringify( { article: article } ) )
+})
+```
+
+[middleware/articel.js]
+```js
+//如果数据是从 路由Router过来
+function getArticleById (req, res, next)  {
+//然后再路由里，我只需要这样用就行了，直接从req里面解构过来,需要说明一些
+// let id = req.params.id,这个用于处理get /:?这样的数据，?的具体数据，就能从req.params里面弄出来
+// let id = req.body,这个用于处理POST这样的数据，具体数据，就能从req.body里面弄出来
+    let id = req.params.id  
+    Article.getArticleById(id).then(results => {
+        req.article = results
+        next()//放行
+    }).catch(err => {
+        next(err)
+    })
+}
+
+```
+
+以上就是最基础的Node for Mysql数据的DAO层的封装，这样一来，后面的数据操作，就变得简单的多了，希望我的文章对你有所帮助！~~~
+
+
+
+## 二、关于Node for MangoDB的DAO封装
+1. 首先是npm install mongoose下载 不多解释
+
+2. 开始封装
+这里我们同样也是有两个层面的模型，一个dao层，一个是具体的实现层
+[molde/dao/]
+```js
+//这里仅仅演示了一部分的dao命令
+module.exports =  class MongoDB {
+    //构造器
+    constructor(collectionName) {
+        this.MongoClient = require('mongodb').MongoClient;
+        this.url =  "mongodb://root:root@localhost/";
+        this.dbName = "blogs_2node_kaifa";
+        //由于我们的表设计到了多表的操作，所以表（集合）是要变来变去的，所以这里改成由具体的实现传入
+
+        //具体的操作是那项表交与用户具体实现，
+        this.collection = collectionName;
+    }
+
+    //不要加入static ，如果加入就变成静态的了，实例的对象就用不了这些静态的方法了
+
+    //链接
+     connect(url,callback){
+        if (!url) {
+            return;
+        }
+        this.MongoClient.connect(url, function(err, db) {
+                callback(err, db);
+                db.close();//关闭流
+        });
+    }
+
+     /**
+      * 描述 插入单条数据
+      * @date 2020-04-29
+      * @param {any} oneObj
+      * @param {any} callback
+      * @returns {any}
+      */
+     insertOne(oneObj, callback) {
+        let dbName = this.dbName;
+        let collection = this.collection;
+        console.log('this.d');
+        this.connect(this.url, function(err, db) {
+            var client = db.db(dbName);
+            client.collection(collection).insertOne(oneObj, function(err, res) {
+                if (err) throw err;
+                if (callback) {
+                    callback(err, res);
+                }
+            });
+        });
+    }
+
+    /**
+     * 描述 增加多条数据
+     * @date 2020-04-29
+     * @param {any} objs
+     * @param {any} callback
+     * @returns {any}
+     */
+    insertMany(objs, callback) {
+        if (!Array.isArray(objs)) {
+            throw new Error("非数组，类型不匹配!");
+            return;
+        }
+        let dbName = this.dbName;
+        let collection = this.collection;
+        this.connect(this.url, function(err, db) {
+            var client = db.db(dbName);
+            client.collection(collection).insertMany(objs, function(err, res) {
+                if (err) throw err;
+                if (callback) {
+                    callback(err, res);
+                }
+            });
+        });
+    }
+
+    
+    /**
+     * 描述 查询操作
+     * @date 2020-04-29
+     * @param {any} whereStr
+     * @param {any} callback
+     * @returns {any}
+     */
+    find (whereStr, callback) {
+        let dbName = this.dbName;
+        let collection = this.collection;
+        this.connect(this.url, function(err, db) {
+            if (err) throw err;
+            var client = db.db(dbName);
+            //开始传入指定的查询条件
+            client.collection(collection).find(whereStr).toArray(function(err, result) {
+                if (err) throw err;
+                if (callback) {
+                    callback(err, result);
+                }
+            });
+        });
+    }
+```
+
+
+[model/user.js]
+```js
+//示例话具体的表（集合）操作对象
+const MongoDB =  require('./02.通用的模型层');
+//实例化dao层,并且给它指定的表
+setCollection =  new MongoDB('setCollection')
+
+module.exports =  class User{
+    static getUser(queryMD){
+        return new Promise((resolve,reject)=>{
+            setCollection.insertOne(queryMD,(err,result)=>{
+                if(result){
+                    resolve(result)
+                }else{  
+                    reject(err)
+                }
+            })
+        })
+    }
+    static updataMany(queryMD){
+        return new Promise((resolve,reject)=>{
+            setCollection.updataMany(queryMD,(err,result)=>{
+                if(result){
+                    resolve(result)
+                }else{  
+                    reject(err)
+                }
+            })
+        })
+    }
+}
+
+```
+
+
+**以上外面的mongoose的模型层就构建好了**，接下里就是我们的中间件部分
+
+```js
+
+//这里是模拟的是中间件，。如果这里有传参和之前的mysql的dao层是一样的操作直接把req身上的都写带下来就可以了
+
+const User = require('./03_具体的模型实现层');
+
+function getSet(queryMD){
+    //在这里你可以取查询的要素做处理然后，处理完成之后才丢给查询
+    //这里仅仅是为了演示，就不做具体的要素处理了，
+    console.log('Jigru1');
+    User.getUser(queryMD).then((result) => {
+
+        console.log( result );//这样我们就查询成功了
+    }).catch((err) => {
+        console.log(err);
+    });
+
+}
+//假设，我现在要设置username=admin的用用户，于是乎我就
+getSet({"username":"admin"})
+
+```
+
+
+特别说明：由于mongo中的不能像msq这种直接用sql的查询，所以使用起来，也不太爽，对于find()之后的各种条件匹配，我们不写在dao层中，具体的模型实现的时候，在写具体的模型查询语句，我认为是极好的一种规范，
+
+**欢迎大佬赐教，欢迎大家来我的git让这个dao层的封装变得更强大**
